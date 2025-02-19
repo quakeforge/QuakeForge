@@ -40,6 +40,7 @@ typedef struct {
 	int         level;
 	size_t      portal_limit;
 	struct dstring_s *bspfile;
+	float       targetratio;
 } options_t;
 
 extern options_t options;

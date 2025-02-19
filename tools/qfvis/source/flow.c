@@ -301,6 +301,234 @@ free_winding_memory (threaddata_t *thread, size_t winding_mark)
 }
 
 /*
+	TargetChecks
+
+	Filter mightsee by clipping against all portals
+*/
+static unsigned
+TargetChecks(threaddata_t *thread,
+			 pstack_t *prevstack,
+			 set_t **mainportalbits,
+			 set_t **tempportalbits)
+{
+	unsigned    i, initial_portalcheck;
+	portal_t   *target_portal;
+	vec4f_t     backplane;
+	vec4f_t     source_plane, pass_plane;
+	const winding_t *pass_winding;
+	winding_t  *source_winding, *target_winding;
+
+	if (prevstack->pass_winding == NULL)
+		return 0;
+	
+	thread->stats.chains++;
+
+	// initialize counter
+	initial_portalcheck = thread->stats.portalcheck;
+
+	// reuse separators
+	sep_t *separators[2] = {NULL, NULL};
+	if (prevstack->next) {
+		separators[0] = prevstack->next->separators[0];
+		separators[1] = prevstack->next->separators[1];
+	}
+
+	// empty cluster set
+	set_t *mightsee = thread->scratchbits;
+	set_empty(mightsee);
+
+	// empty portal set
+	set_t *prevportalbits = *mainportalbits;
+	set_t *portalbits = *tempportalbits;
+	set_empty(portalbits);
+	*mainportalbits = portalbits;
+	*tempportalbits = prevportalbits;
+
+	source_plane = thread->pstack_head.pass_plane;
+	pass_winding = prevstack->pass_winding;
+	pass_plane = prevstack->pass_plane;
+
+	// lower than 2 won't have a benefit. higher than 2 refines the source
+	// portal even though it isn't propagated forward right now.
+	int level = 2; // = options.level
+
+	size_t      winding_mark = Hunk_LowMark (thread->hunk);
+
+	// check all portals for flowing into other leafs
+	for (i = 0, target_portal = portals; i < numportals * 2; i++, target_portal++) {
+
+		if (!set_is_member(prevstack->mightsee, target_portal->cluster))
+            continue;           // can't possibly see it
+		if (!set_is_member(prevportalbits, i))
+            continue;           // can't possibly see it
+		if (set_is_member(mightsee, target_portal->cluster)) {
+			// target check already done and passed
+			set_add(portalbits, i); // let the portal survive to the next level
+            continue;           
+		}
+
+		// get plane of target_portal, point normal into the neighbor cluster
+		backplane = -target_portal->plane;
+
+		vec4f_t     diff = vabs4f (pass_plane - backplane);
+		vec4i_t     cmp = diff > (vec4f_t) {0.001, 0.001, 0.001, 0.001};
+		if (!(cmp[0] || cmp[1] || cmp[2])) { // dist isn't interesting
+			continue;		// can't go out a coplanar face
+		}
+
+		free_winding_memory (thread, winding_mark);
+
+		thread->stats.portalcheck++;
+
+		target_winding = target_portal->winding;
+		target_winding = ClipWinding (thread, target_winding, source_plane, false);
+		if (!target_winding)
+			continue;
+
+		if (!pass_winding) {
+			// unreachable
+		}
+
+		target_winding = ClipWinding (thread, target_winding, pass_plane, false);
+		if (!target_winding)
+			continue;
+
+		// copy source_winding because it likely is already a copy and thus
+		// if it gets clipped away, earlier stack levels will get corrupted
+		source_winding = CopyWinding (thread, prevstack->source_winding);
+
+		source_winding = ClipWinding (thread, source_winding, backplane, false);
+		if (!source_winding) {
+			continue;
+		}
+
+		thread->stats.portaltest++;
+		thread->stats.targettested++;
+
+		if (level > 0) {
+			winding_t  *old = target_winding;
+			if (!separators[0])
+				separators[0] = FindSeparators (thread,
+												source_winding,
+												source_plane,
+												pass_winding, 0);
+			target_winding = ClipToSeparators (thread,
+											   separators[0],
+											   target_winding);
+			if (!target_winding) {
+				thread->stats.targetclipped++;
+				continue;
+			}
+			if (target_winding != old)
+				thread->stats.targettrimmed++;
+		}
+
+		if (level > 1) {
+			winding_t  *old = target_winding;
+			if (!separators[1])
+				separators[1] = FindSeparators (thread,
+												pass_winding,
+												pass_plane,
+												source_winding, 1);
+			target_winding = ClipToSeparators (thread,
+											   separators[1],
+											   target_winding);
+			if (!target_winding) {
+				thread->stats.targetclipped++;
+				continue;
+			}
+			if (target_winding != old)
+				thread->stats.targettrimmed++;
+		}
+
+		thread->stats.sourcetested++;
+		if (level > 2) {
+			winding_t  *old = source_winding;
+			sep_t      *sep;
+			sep = FindSeparators (thread,
+								  target_winding, target_portal->plane,
+								  pass_winding, 0);
+			source_winding = ClipToSeparators (thread, sep, source_winding);
+			free_separators (thread, sep);
+			if (!source_winding) {
+				thread->stats.sourceclipped++;
+				continue;
+			}
+			if (source_winding != old)
+				thread->stats.sourcetrimmed++;
+		}
+
+		if (level > 3) {
+			winding_t  *old = source_winding;
+			sep_t      *sep;
+			sep = FindSeparators (thread, pass_winding, pass_plane,
+								  target_winding, 1);
+			source_winding = ClipToSeparators (thread, sep, source_winding);
+			free_separators (thread, sep);
+			if (!source_winding) {
+				thread->stats.sourceclipped++;
+				continue;
+			}
+			if (source_winding != old)
+				thread->stats.sourcetrimmed++;
+		}
+
+		thread->stats.portalpass++;
+
+		set_add(mightsee, target_portal->cluster);
+		set_add(portalbits, i);
+	}
+
+	free_winding_memory (thread, winding_mark);
+	if (prevstack->next == NULL) {
+		// only free if they aren't borrowed
+		free_separators (thread, separators[1]);
+		free_separators (thread, separators[0]);
+	}
+
+	// replace with reduced version
+	thread->scratchbits = prevstack->mightsee;
+	prevstack->mightsee = mightsee;
+
+	return thread->stats.portalcheck - initial_portalcheck;
+}
+
+/*
+	IterativeTargetChecks
+
+	Retrace the path and reduce mightsee by clipping the targets directly
+*/
+static unsigned
+IterativeTargetChecks(threaddata_t *thread, pstack_t *head)
+{
+	unsigned numchecks = 0;
+
+	set_t *portalbits = set_new_size_r(&thread->set_pool, numportals * 2);
+	set_t *tempportalbits = set_new_size_r(&thread->set_pool, numportals * 2);
+	set_invert(portalbits);
+
+	for (pstack_t* stack = head; stack && stack->cluster; stack = stack->next)
+	{
+		if (stack->did_targetchecks)
+			continue;
+
+		numchecks += TargetChecks(thread, stack, &portalbits, &tempportalbits);
+
+		if (stack->next)
+			set_intersection(stack->next->mightsee, stack->mightsee);
+
+		// mark as done
+		stack->did_targetchecks = true;
+		stack->num_expected_targetchecks = 0;
+	}
+
+	set_delete_r(&thread->set_pool, portalbits);
+	set_delete_r(&thread->set_pool, tempportalbits);
+
+	return numchecks;
+}
+
+/*
 	RecursiveClusterFlow
 
 	Flood fill through the clusters
@@ -336,6 +564,18 @@ RecursiveClusterFlow (int clusternum, threaddata_t *thread, pstack_t *prevstack)
 		thread->base->numcansee++;
 	}
 
+	// check all target portals instead of just neighbor portals, if the time is right
+	if (options.targetratio > 0.0 &&
+		prevstack->num_expected_targetchecks > 0 &&
+		thread->numsteps * options.targetratio >=
+		thread->numtargetchecks + prevstack->num_expected_targetchecks)
+	{
+		unsigned num_actual_targetchecks = IterativeTargetChecks(thread, thread->pstack_head.next);
+		// thread->stats.c_targetcheck += num_actual_targetchecks;
+		thread->numtargetchecks += num_actual_targetchecks;
+		// prevstack.num_expected_targetchecks is zero now
+	}
+
 	stack->cluster = cluster;
 	stack->pass_portal = NULL;
 	stack->separators[0] = 0;
@@ -357,10 +597,19 @@ RecursiveClusterFlow (int clusternum, threaddata_t *thread, pstack_t *prevstack)
 
 		// if target_portal can't see anything we haven't already seen, skip it
 		test = select_test_set (target_portal, thread);
+		might = stack->mightsee; // can change between iterations
 		if (!mightsee_more (might, prevstack->mightsee, test, vis)) {
 			// can't see anything new
 			continue;
 		}
+
+		stack->did_targetchecks = false;
+		stack->num_expected_targetchecks = 0;
+		// calculate num_expected_targetchecks only if we're using it, since it's somewhat expensive to compute
+		if (options.targetratio > 0.0)
+			stack->num_expected_targetchecks =
+				prevstack->num_expected_targetchecks +
+				set_count(might);
 
 		// get plane of target_portal, point normal into the neighbor cluster
 		backplane = -target_portal->plane;
@@ -373,6 +622,7 @@ RecursiveClusterFlow (int clusternum, threaddata_t *thread, pstack_t *prevstack)
 
 		free_winding_memory (thread, winding_mark);
 
+		thread->numsteps++;
 		thread->stats.portalcheck++;
 
 		target_winding = target_portal->winding;
@@ -504,6 +754,7 @@ PortalFlow (threaddata_t *data, portal_t *portal)
 
 	portal->visbits = set_new_size_r (&data->set_pool, portalclusters);
 
+	data->scratchbits = set_new_size_r (&data->set_pool, portalclusters);
 	data->clustervis = portal->visbits;
 	data->base = portal;
 
@@ -517,4 +768,6 @@ PortalFlow (threaddata_t *data, portal_t *portal)
 	data->pstack_head.separators[1] = 0;
 
 	RecursiveClusterFlow (portal->cluster, data, &data->pstack_head);
+
+	set_delete_r(&data->set_pool, data->scratchbits);
 }

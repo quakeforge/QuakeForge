@@ -140,6 +140,9 @@ typedef struct pstack_s {
 	winding_t  *pass_winding;	///< clipped pass portal winding
 	set_t      *mightsee;
 	sep_t      *separators[2];
+	bool        did_targetchecks; ///< mightsee has been reduced with source/pass
+	unsigned    num_expected_targetchecks; ///< estimated cost of doing target checks,
+	                            /// including cost of level above
 } pstack_t;
 
 typedef struct {
@@ -177,6 +180,9 @@ typedef struct threaddata_s {
 	set_pool_t  set_pool;
 	int         id;
 	int         winding_id;
+	unsigned    numsteps;
+	unsigned    numtargetchecks;
+	set_t      *scratchbits;
 } threaddata_t;
 
 typedef struct {

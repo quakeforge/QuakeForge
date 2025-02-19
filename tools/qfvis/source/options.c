@@ -79,6 +79,7 @@ static const char *short_options =
 	"t:"	// threads
 	"m"		// minimal vis
 	"l:"	// level
+	"r:"    // target check ratio
 	"f:"	// file
 	;
 
@@ -97,6 +98,7 @@ usage (int status)
 		"    -t, --threads [num]       Number of threads to use\n"
 		"    -m, --minimal             Perform minimal vis'ing\n"
 		"    -l, --level [level]       Vis level to perform\n"
+		"    -r [ratio]                Target checks ratio\n"
 		"    -f, --file [bspfile]      BSP file to vis\n\n");
 	exit (status);
 }
@@ -120,6 +122,7 @@ DecodeArgs (int argc, char **argv)
 	options.bspfile = NULL;
 	options.threads = default_threads ();
 	options.level = 4;
+	options.targetratio = 0.0f;
 
 	while ((c = getopt_long (argc, argv, short_options, long_options, 0))
 		   != EOF) {
@@ -158,6 +161,9 @@ DecodeArgs (int argc, char **argv)
 				break;
 			case 'l':					// level
 				options.level = atoi (optarg);
+				break;
+			case 'r':					// target checks ratio
+				options.targetratio = atof (optarg);
 				break;
 			case 'f':					// set filename
 				options.bspfile = dstring_strdup (optarg);
